@@ -16,3 +16,5 @@ rootProject.name = "AidlDemo"
 include ':Client'
 include ':Common'
 include ':Service'
+include ':Service:FibLib'
+include ':Service:FibLib'
