@@ -16,7 +16,9 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.os.AsyncTask;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Message;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.text.TextUtils;
@@ -32,11 +34,21 @@ import android.widget.Toast;
 import com.aidl.demo.common.FibonacciRequest;
 import com.aidl.demo.common.FibonacciResponse;
 import com.aidl.demo.common.IFibonacciService;
+import com.aidl.demo.common.IFibonacciServiceResponseListener;
+
+import java.util.Locale;
+import java.util.Objects;
 
 public class FibonacciActivity extends Activity implements OnClickListener,
         ServiceConnection {
 
     private static final String TAG = "FibonacciActivity";
+
+    // the id of a message to our response handler
+    private static final int RESPONSE_MESSAGE_ID = 1;
+
+    // the id of a progress dialog that we'll be creating
+    private static final int PROGRESS_DIALOG_ID = 1;
 
     private EditText input; // our input n
 
@@ -49,6 +61,39 @@ public class FibonacciActivity extends Activity implements OnClickListener,
     private IFibonacciService service; // reference to our service
 
     private PackageManager packageManager;
+    // the responsibility of the responseHandler is to take messages
+    // from the responseListener (defined below) and display their content
+    // in the UI thread
+    private final ThreadLocal<Handler> responseHandler = new ThreadLocal<Handler>() {
+        private void handleMessage(Message message) {
+            if (message.what == RESPONSE_MESSAGE_ID) {
+                Log.d(TAG, "Handling response");
+                FibonacciActivity.this.output.setText((String) message.obj);
+                FibonacciActivity.this.removeDialog(PROGRESS_DIALOG_ID);
+            }
+        }
+    };
+
+    // the responsibility of the responseListener is to receive call-backs
+    // from the service when our FibonacciResponse is available
+    private final IFibonacciServiceResponseListener responseListener = new IFibonacciServiceResponseListener.Stub() {
+
+        // this method is executed on one of the pooled binder threads
+        @Override
+        public void onResponse(FibonacciResponse response)
+                throws RemoteException {
+            Locale locale = FibonacciActivity.this.getResources()
+                    .getConfiguration().locale;
+            String result = String.format(locale, "%d in %d ms",
+                    response.getResult(), response.getTimeInMillis());
+            Log.d(TAG, "Got response: " + result);
+            // since we cannot update the UI from a non-UI thread,
+            // we'll send the result to the responseHandler (defined above)
+            Message message = Objects.requireNonNull(FibonacciActivity.this.responseHandler.get())
+                    .obtainMessage(RESPONSE_MESSAGE_ID, result);
+            Objects.requireNonNull(FibonacciActivity.this.responseHandler.get()).sendMessage(message);
+        }
+    };
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -66,6 +111,35 @@ public class FibonacciActivity extends Activity implements OnClickListener,
         packageManager = getPackageManager();
     }
 
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putCharSequence("output", this.output.getText());
+        Log.d(TAG, "Saved output");
+    }
+
+    @Override
+    protected void onStart() {
+        Log.d(TAG, "onStart()'ed");
+        super.onStart();
+        // Bind to our FibonacciService service, by looking it up by its name
+        // and passing ourselves as the ServiceConnection object
+        // We'll get the actual IFibonacciService via a callback to
+        // onServiceConnected() below
+        if (!super.bindService(new Intent(IFibonacciService.class.getName()),
+                this, BIND_AUTO_CREATE)) {
+            Log.w(TAG, "Failed to bind to service");
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        Log.d(TAG, "onStop()'ed");
+        super.onStop();
+        // No need to keep the service bound (and alive) any longer than
+        // necessary
+        super.unbindService(this);
+    }
     @Override
     protected void onResume() {
         Log.d(TAG, "onResume()'ed");
@@ -138,46 +212,19 @@ public class FibonacciActivity extends Activity implements OnClickListener,
             default:
                 return;
         }
+
         final FibonacciRequest request = new FibonacciRequest(n, type);
-
-        // showing the user that the calculation is in progress
-        final ProgressDialog dialog = ProgressDialog.show(this, "",
-                super.getText(R.string.progress_text), true);
-        // since the calculation can take a long time, we do it in a separate
-        // thread to avoid blocking the UI
-        new AsyncTask<Void, Void, String>() {
-            @Override
-            protected String doInBackground(Void... params) {
-                // this method runs in a background thread
-                try {
-                    long totalTime = SystemClock.uptimeMillis();
-                    FibonacciResponse response = FibonacciActivity.this.service
-                            .fib(request);
-                    totalTime = SystemClock.uptimeMillis() - totalTime;
-                    // generate the result
-                    return String.format(
-                            "fibonacci(%d)=%d\nin %d ms\n(+ %d ms)", n,
-                            response.getResult(), response.getTimeInMillis(),
-                            totalTime - response.getTimeInMillis());
-                } catch (RemoteException e) {
-                    Log.wtf(TAG, "Failed to communicate with the service", e);
-                    return null;
-                }
-            }
-
-            @Override
-            protected void onPostExecute(String result) {
-                // get rid of the dialog
-                dialog.dismiss();
-                if (result == null) {
-                    // handle error
-                    Toast.makeText(FibonacciActivity.this, R.string.fib_error,
-                            Toast.LENGTH_SHORT).show();
-                } else {
-                    // show the result to the user
-                    FibonacciActivity.this.output.setText(result);
-                }
-            }
-        }.execute(); // run our AsyncTask
+        try {
+            Log.d(TAG, "Submitting request...");
+            long time = SystemClock.uptimeMillis();
+            // submit the request; the response will come to responseListener
+            this.service.fib(request, this.responseListener);
+            time = SystemClock.uptimeMillis() - time;
+            Log.d(TAG, "Submited request in " + time + " ms");
+            // this dialog will be dismissed/removed by responseHandler
+            super.showDialog(PROGRESS_DIALOG_ID);
+        } catch (RemoteException e) {
+            Log.wtf(TAG, "Failed to communicate with the service", e);
+        }
     }
 }

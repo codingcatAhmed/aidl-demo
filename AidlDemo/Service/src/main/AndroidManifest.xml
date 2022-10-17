@@ -8,8 +8,6 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.AidlDemo">
-
-
         <service
             android:name=".FibonacciService"
             android:enabled="true"
